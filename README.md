@@ -18,6 +18,8 @@ Install from GitHub through Hermes, review the dependency prompt, and leave the 
 hermes plugins install web3blind/hermes-chrome-tab-watchdog --no-enable
 ```
 
+The native installer treats this as an unreviewed community source. Its security scanner may emit **CAUTION** for the loopback HTTP/CDP connection, the Linux fd-relative Unix-socket helper, and disposable Chromium test launchers. A non-interactive install can therefore be blocked before installation. Review the reported findings and source before explicitly approving them through Hermes; do not disable scanning. The command above intentionally does not bypass this gate. The runtime does not launch Chromium; the launchers are isolated test fixtures.
+
 Perform initial setup while no browser tasks are running. Apply the settings below, then enable the plugin with `hermes plugins enable chrome-tab-watchdog`. Check `--health` before resuming browser work. Routing through a plugin that is not loaded makes browser tools unavailable. This repository is not part of the curated Hermes plugin catalog.
 
 ## Settings
