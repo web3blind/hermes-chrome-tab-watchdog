@@ -1,0 +1,10 @@
+name: chrome-tab-watchdog
+version: 2.1.0
+description: In-process CDP observation, browser-call leases and no-model tab cleanup.
+config_schema:
+  idle_hours: {type: float, default: 6, description: Ordinary page inactivity in hours}
+  duplicate_hours: {type: float, default: 2, description: Exact duplicate loser inactivity in hours}
+  blank_minutes: {type: float, default: 30, description: 'Exact about:blank age in minutes'}
+  upstream: {type: str, default: 'http://127.0.0.1:9222', description: Existing loopback Chrome CDP endpoint}
+  proxy_host: {type: str, choices: ['127.0.0.1', localhost], default: '127.0.0.1'}
+  proxy_port: {type: int, default: 9223, description: Plugin-owned loopback forwarding port}

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-chrome-tab-watchdog"
+version = "2.1.0"
+license = {file = "LICENSE"}
+description = "In-process Hermes CDP activity observer and conservative tab cleanup"
+requires-python = ">=3.11"
+dependencies = ["websockets>=15,<16"]
+
+[project.entry-points."hermes_agent.plugins"]
+chrome-tab-watchdog = "tabwatch_plugin:register"
+
+[project.scripts]
+hermes-tabwatch = "tabwatch_plugin.cli:main"
+
+[tool.setuptools]
+packages = ["tabwatch_plugin"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
