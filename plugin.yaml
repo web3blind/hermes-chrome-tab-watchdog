@@ -1,5 +1,7 @@
 name: chrome-tab-watchdog
 version: 2.1.0
+requires_hermes: '>=0.22.5'
+provides_middleware: [tool_execution]
 description: In-process CDP observation, browser-call leases and no-model tab cleanup.
 config_schema:
   idle_hours: {type: float, default: 6, description: Ordinary page inactivity in hours}

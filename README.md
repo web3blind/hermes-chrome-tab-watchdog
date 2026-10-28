@@ -100,6 +100,16 @@ Six-hour close acceptance includes real closure of an isolated disposable Chromi
 
 The internal forwarding listener remains part of the browser route. A complete plugin unload, missing dependency, invalid transport configuration or port-bind failure can make that route unavailable. Restore the original direct browser endpoint **before disabling/uninstalling the plugin**. This does not claim that every possible plugin/runtime failure is transparent to browser transport.
 
+## Catalog review disclosures
+
+Hermes >=0.22.5 is required. The only registered capability is `tool_execution` middleware; there are no model tools, hooks, credential backends or required secrets.
+
+The plugin attaches CDP sessions and installs page activity listeners to observe trusted input/focus without recording typed content. It forwards browser protocol traffic through a loopback listener and uses a profile-local Unix control socket and background observer thread inside Hermes. Runtime state (SQLite, a generated local URL-HMAC key, locks and sanitized gap markers) belongs to the profile's `state/chrome-tab-watchdog` directory. The HMAC key is not a provider credential. No telemetry, external API calls, self-updater or runtime shell/subprocess launcher is included. Disposable test fixtures launch their own unauthenticated Chromium only.
+
+The admission scanner reports `proc_access` for `/proc/self/fd` socket addressing on Linux; the fd-relative helper handles long Unix-socket paths. Admission also warns about the read-only `tools.browser_tool_cdp` import used to detect effective live/secret-scoped CDP routing overrides. Those internal resolver names can change between Hermes releases; failed resolution fences cleanup instead of bypassing route validation. The plugin never replaces or mutates core functions. Native plugins execute in the Hermes host, not a security sandbox.
+
+Review the routing requirement, unsaved-editor expiry and disable/uninstall recovery instructions above before approving installation. Catalog submission is not catalog acceptance; only a maintainer-reviewed merge establishes that trust signal.
+
 ## Validation and development
 
 Use the canonical Hermes `scripts/run_tests.sh` with this repository's `tests/` path; do not test against the real profile. Tests use disposable homes/Chromium, synthetic clocks and owned targets. `tests/sdk_probe.py` exercises real SDK discovery and unload in an explicitly marked isolated home. Keep private planning notes, state, profiles, logs/backups and host-specific routing out of distribution. Tests require pytest, pytest-asyncio and an installed Chromium; fixtures do not use your authenticated browser.
