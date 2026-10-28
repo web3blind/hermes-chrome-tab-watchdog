@@ -4,6 +4,7 @@ import math
 import os
 import json
 import hashlib
+import importlib
 from urllib.parse import urlsplit
 
 
@@ -64,16 +65,24 @@ def route_is_observed(settings, config, args):
     expected = (settings['proxy_host'], settings['proxy_port'])
     routes = [config.get('browser', {}).get('cdp_url', '')]
     routes += [os.environ[key] for key in ('BROWSER_CDP_URL', 'BU_CDP_URL', 'BU_CDP_WS') if os.environ.get(key)]
-    # New Hermes releases keep live and secret-scoped overrides outside os.environ.
-    # These are nonmutating resolvers; older supported releases expose only env/config.
+    # Released and current Hermes use different names for these read-only APIs.
+    # Only an absent optional module is ignored; dependency/resolver errors fence.
     try:
-        from tools import browser_tool_cdp
-        for name in ('live_cdp_override', 'env_cdp_url'):
-            resolver = getattr(browser_tool_cdp, name, None)
-            if resolver is not None:
-                value = resolver()
+        found = False
+        for module_name in ('tools.browser_session_cdp', 'tools.browser_tool_cdp'):
+            try:
+                module = importlib.import_module(module_name)
+            except ModuleNotFoundError as exc:
+                if exc.name != module_name:
+                    raise
+                continue
+            found = True
+            for name in ('live_cdp_override', 'env_cdp_url'):
+                value = getattr(module, name)()
                 if value:
                     routes.append(value)
+        if not found:
+            return False
     except Exception:
         return False
     for route in routes:

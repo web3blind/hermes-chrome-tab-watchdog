@@ -170,9 +170,13 @@ def test_bypassed_route_fences_before_single_dispatch(loaded, monkeypatch, key):
 
 @pytest.mark.parametrize('resolver', ['live_cdp_override', 'env_cdp_url'])
 def test_profile_override_fences_before_single_dispatch(loaded, monkeypatch, resolver):
-    from tools import browser_tool_cdp
+    import importlib
+    import importlib.util
+    name = ('tools.browser_session_cdp' if importlib.util.find_spec('tools.browser_session_cdp')
+            else 'tools.browser_tool_cdp')
+    browser_cdp = importlib.import_module(name)
     ctx, runtime = loaded
-    monkeypatch.setattr(browser_tool_cdp, resolver, lambda: 'http://127.0.0.1:1', raising=False)
+    monkeypatch.setattr(browser_cdp, resolver, lambda: 'http://127.0.0.1:1')
     calls = []
     def action(args):
         assert fence_stamp(runtime.state) is not None

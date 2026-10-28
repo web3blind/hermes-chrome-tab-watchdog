@@ -1,5 +1,5 @@
 name: chrome-tab-watchdog
-version: 2.1.0
+version: 2.1.1
 requires_hermes: '>=0.22.5'
 provides_middleware: [tool_execution]
 description: In-process CDP observation, browser-call leases and no-model tab cleanup.
