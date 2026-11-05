@@ -54,6 +54,8 @@ class Store:
         self.clock = clock
         self.epoch = None
         self.coverage_since = clock()
+        self.blank_grace_since = self.coverage_since
+        self.cleanup_hold_until = 0.0  # monotonic; old owner's unacknowledged work
         self.fresh = 0
         self.ready = False
         self.pending = {}
@@ -191,7 +193,7 @@ class Store:
         return bool(self.leases) or bool(self.pending.get('*',0)) or bool(self.pending.get(target,0))
 
     def candidates(self):
-        if not self.healthy() or self.fenced():
+        if time.monotonic() < self.cleanup_hold_until or not self.healthy() or self.fenced():
             return []
         now = self.clock(); result = []
         for r in sorted(self.rows(), key=lambda r:r['target']):
@@ -199,7 +201,7 @@ class Store:
                 continue
             last = max(r['first_seen'],r['last_activation'],r['last_tool'],self.coverage_since,
                        self.observer_grace.get(r['target'], 0))
-            if r['url_hash'] == self.digest('about:blank') and now-r['first_seen'] >= self.policy.blank_minutes * 60:
+            if r['url_hash'] == self.digest('about:blank') and now-max(r['first_seen'],self.blank_grace_since) >= self.policy.blank_minutes * 60:
                 result.append((r['target'],'blank'))
             elif now-last >= self.policy.idle_hours * 3600:
                 result.append((r['target'],'idle'))

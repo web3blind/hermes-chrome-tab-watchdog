@@ -82,6 +82,21 @@ Gap records contain only an enumerated cause, timestamp and PID. Health reports 
 
 ## Idle timer continuity
 
+A disconnected read-only dry-run client does not disable cleanup. An uncertain mutating
+control request still fences it. Transient control, lease and activity-telemetry failures can recover
+automatically after 1900 seconds (the maximum browser-call lease), once fresh complete
+observation is available and no leases or pending commands remain. Every new transient
+fence restarts the full wait; routing, settings and ledger failures remain blocked for
+repair. Recovery accepts only the exact fence it waited for and starts new observation
+grace, including a fresh blank-page grace; old unobserved time never earns closure.
+Health exposes `control_recovery_wait_seconds`. This is a minimum wait, not a promise
+that a broken browser or unsafe routing will recover without intervention.
+A reload with an existing gap also holds cleanup for the maximum old-owner lease
+duration while observation continues; health reports `startup_cleanup_wait_seconds`.
+External cron workers attach to the observer but never acquire ownership, so a
+long-running job cannot capture the browser route with stale code during a gateway
+reload. Health reports the actual owner's PID and `runtime_version`.
+
 Client CDP transport loss alone is not loss of the independent observer. A completed or interrupted command attributed to a known page updates only that page's tool time; unrelated pages retain their inactivity history. Unattributed activity, observer loss, timing gaps and browser-epoch changes still restart the required global safety grace. Health exposes a bounded recent_gaps list containing only fixed cause labels and allowlisted protocol-method names, never command arguments.
 
 Six-hour close acceptance includes real closure of an isolated disposable Chromium page with a synthetic test clock, exact-boundary checks and an active-lease veto. Live page timestamps are never aged or rewritten to force acceptance.

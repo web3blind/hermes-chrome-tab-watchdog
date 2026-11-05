@@ -3,6 +3,7 @@ import asyncio
 import atexit
 import contextvars
 import logging
+import sys
 import threading
 
 from .service import Service
@@ -17,6 +18,9 @@ class Runtime:
         self.settings = settings
         self.policy = policy
         self.cleanup_error = cleanup_error
+        # External scheduler jobs can survive a gateway reload. They must not
+        # capture its observer/forwarding port with a stale imported package.
+        self.may_own = '--external-worker-file' not in sys.argv
         self.signature = settings_signature(settings, policy, cleanup_error)
         self.service = None
         self.loop = None
@@ -68,6 +72,8 @@ class Runtime:
         fenced_owner = None
         while not self.stopped.is_set():
             try:
+                if not self.may_own:
+                    raise BlockingIOError('external_worker_attaches_only')
                 service = Service(self.state, self.settings['upstream'], self.settings['proxy_port'],
                                   self.policy, self.settings['proxy_host'], self.cleanup_error)
             except BlockingIOError:

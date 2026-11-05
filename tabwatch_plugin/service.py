@@ -17,7 +17,15 @@ from websockets.asyncio.server import serve
 from websockets.datastructures import Headers
 from websockets.http11 import Response
 from .store import Store, page_target
-from .control import fence_cleanup, socket_address, gap_reason
+from .control import fence_cleanup, socket_address, gap_reason, fence_stamp
+
+# An unacknowledged control call can cover a browser action for this long.
+# Recovery never assumes that a timed-out caller stopped its work.
+CONTROL_RECOVERY_SECONDS = 1900
+RECOVERABLE_GAPS = {'control_failure', 'lease_unavailable',
+                    'outgoing_telemetry_failure', 'incoming_telemetry_failure',
+                    'completion_telemetry_failure', 'observer_telemetry_failure',
+                    'health_telemetry_failure'}
 
 WORLD = '__tabwatch_focus_v1'
 BINDING = '__tabwatch_activation_v1'
@@ -163,6 +171,8 @@ class Service:
         self.port = port
         self.host = host
         self.cleanup_error = cleanup_error
+        self.control_recovery = None
+        self.last_control_error = None
         self.incarnation = uuid.uuid4().hex
         self.policy = policy
         self.store = None
@@ -179,6 +189,10 @@ class Service:
         try:
             self.store = Store(state, policy=policy)
             self.store.disabled = cleanup_error is not None
+            if self.store.fence_stamp is not None:
+                # Reload cannot inherit another owner's in-memory leases. Keep
+                # observing, but outwait its longest possible browser action.
+                self.store.cleanup_hold_until = time.monotonic() + CONTROL_RECOVERY_SECONDS
         except Exception:
             self.cleanup_error = 'ledger_unavailable'
         # A plugin-local logger: no global logging mutations and no raw frames.
@@ -262,12 +276,77 @@ class Service:
                 self.lock.close()
 
     def disable_cleanup(self, reason, *, cause=None):
+        # A transient failure must not erase an unresolved permanent fence,
+        # including one written by another attached process.
+        previous = gap_reason(self.socket_path.parent)
+        previous_stamp = fence_stamp(self.socket_path.parent)
+        baseline = self.store.fence_stamp if self.store is not None else None
+        if (cause or reason) in RECOVERABLE_GAPS and (
+                (self.cleanup_error is not None and self.cleanup_error not in
+                 RECOVERABLE_GAPS | {'untracked_activity_gap'}) or
+                (previous_stamp != baseline and previous not in RECOVERABLE_GAPS)):
+            if self.store is not None:
+                self.store.disabled = True
+            if self.cleanup_error is None:
+                self.cleanup_error = 'untracked_activity_gap'
+            self.control_recovery = None
+            if previous_stamp is None:
+                with contextlib.suppress(Exception):
+                    fence_cleanup(self.socket_path.parent, reason=self.cleanup_error)
+            return
         # Latch first, before fallible persistence. No exception text or payloads.
         self.cleanup_error = reason
         if self.store is not None:
             self.store.disabled = True
         with contextlib.suppress(Exception):
             fence_cleanup(self.socket_path.parent, reason=cause or reason)
+            self.control_recovery = (
+                (time.monotonic() + CONTROL_RECOVERY_SECONDS,
+                 fence_stamp(self.socket_path.parent))
+                if reason == 'control_failure' and cause is None else None)
+
+    def recover_control(self):
+        """Accept a bounded transient activity gap, then start new grace.
+
+        Routing, configuration and storage failures require operator repair.
+        Transient activity gaps require the full lease bound and fresh grace.
+        This runs on the owner loop after a fully validated observer heartbeat.
+        """
+        store = self.store
+        if store is None:
+            return False
+        stamp = fence_stamp(self.socket_path.parent)
+        reason = gap_reason(self.socket_path.parent)
+        if self.cleanup_error is None and stamp != store.fence_stamp:
+            self.cleanup_error = 'untracked_activity_gap'
+            store.disabled = True
+        if (reason not in RECOVERABLE_GAPS or self.cleanup_error not in
+                RECOVERABLE_GAPS | {'untracked_activity_gap'}):
+            self.control_recovery = None
+            return False
+        if self.control_recovery is None or self.control_recovery[1] != stamp:
+            # A new gap always restarts the complete bounded-action wait.
+            self.control_recovery = (time.monotonic() + CONTROL_RECOVERY_SECONDS, stamp)
+            return False
+        recovery = self.control_recovery
+        deadline, stamp = recovery
+        if (time.monotonic() < deadline or self.stopping or self.observer_error
+                or not store.ready or store.observer_missing
+                or not 0 <= store.clock() - store.fresh <= 20
+                or any(store.pending.values()) or store.fenced()
+                or fence_stamp(self.socket_path.parent) != stamp):
+            return False
+        # Don't remove the durable evidence. Accept this exact incarnation only;
+        # a later external fence is still detected by Store.healthy().
+        store.coverage(store.epoch)
+        store.blank_grace_since = store.clock()
+        store.fence_stamp = stamp
+        store.disabled = False
+        self.cleanup_error = None
+        self.control_recovery = None
+        logging.getLogger(__name__).info(
+            'Chrome tab watchdog control recovered; fresh observation grace started.')
+        return True
 
     def safe_gap(self):
         try:
@@ -690,6 +769,7 @@ class Service:
                                             for s,t in self.sessions.items()) for tid in ids)):
                             self.store.heartbeat()
                             self.observer_error = None
+                            self.recover_control()
                         else:
                             self.store.ready=False
                         await asyncio.sleep(2)
@@ -778,10 +858,18 @@ class Service:
 
     def health(self):
         base = {'healthy':False, 'cleanup_error':self.cleanup_error, 'runtime_pid':os.getpid(),
+                'runtime_version':'2.1.2',
                 'proxy_port':self.port, 'policy':None,
                 'runtime_incarnation':self.incarnation,
                 'cleanup_gap_reason':gap_reason(self.socket_path.parent),
                 'configuration_signature':getattr(self, 'configuration_signature', None)}
+        base['control_recovery_wait_seconds'] = (
+            max(0, self.control_recovery[0] - time.monotonic())
+            if self.control_recovery is not None else None)
+        base['last_control_error'] = self.last_control_error
+        base['startup_cleanup_wait_seconds'] = (
+            max(0, self.store.cleanup_hold_until - time.monotonic())
+            if self.store is not None else None)
         if self.store is None:
             return base
         try:
@@ -819,10 +907,18 @@ class Service:
         task = asyncio.current_task()
         self.tasks.add(task)
         command = None
+        mutating = False
+        stage = 'read'
         try:
             line=await asyncio.wait_for(reader.readline(),5)
             msg=json.loads(line)
             command=msg.get('command',msg.get('cmd'))
+            if not isinstance(command, str):
+                command = None
+                raise ValueError('invalid_command')
+            stage = 'execute'
+            mutating = command in {'fence', 'lease_start', 'lease_end'} or (
+                command == 'sweep' and msg.get('apply', False) is not False)
             if command=='health': result=self.health()
             elif command == 'fence':
                 self.disable_cleanup('untracked_activity_gap', cause=msg.get('cause'))
@@ -838,13 +934,21 @@ class Service:
                 if not isinstance(apply,bool): raise ValueError('bad_apply')
                 result=await self.sweep(apply)
             else: result={'error':'unknown_command'}
+            stage = 'reply'
             writer.write(json.dumps(result).encode()+b'\n')
             await writer.drain()
-        except Exception:
+        except Exception as exc:
+            safe_command = command if command in {
+                'health', 'sweep', 'fence', 'lease_start', 'lease_end'} else 'unparsed'
+            self.last_control_error = {
+                'command': safe_command, 'stage': stage, 'kind': type(exc).__name__}
             # A disconnected reader of a parsed health request cannot lose tool
             # activity. Health telemetry faults already latch inside health().
-            if command != 'health':
+            if command is None or mutating:
                 self.disable_cleanup('control_failure')
+                logging.getLogger(__name__).warning(
+                    'Chrome tab watchdog control failed: command=%s stage=%s kind=%s; '
+                    'cleanup fenced until safe recovery.', safe_command, stage, type(exc).__name__)
             with contextlib.suppress(Exception):
                 writer.write(b'{"error":"invalid_request"}\n'); await writer.drain()
         finally:

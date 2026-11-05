@@ -96,7 +96,7 @@ def register(ctx):
             fence('validation_failed')
         leased = False
         try:
-            request(state,'lease_start',timeout=2,call_id=call,ttl=ttl)
+            request(state,'lease_start',timeout=5,call_id=call,ttl=ttl)
             leased = True
         except Exception:
             # Fence BEFORE the fallback. Neither a failed lease nor a failed
@@ -112,7 +112,7 @@ def register(ctx):
             # exact in-flight CDP requests have their own target-level fences.
             if completed and leased:
                 try:
-                    request(state,'lease_end',timeout=2,call_id=call)
+                    request(state,'lease_end',timeout=5,call_id=call)
                 except Exception:
                     pass
     try:

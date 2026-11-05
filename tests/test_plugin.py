@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 
@@ -40,12 +41,24 @@ def configured(home, values, route=None):
 @pytest.fixture
 def loaded(isolated_home):
     ctx = configured(isolated_home, settings())
-    start = time.monotonic()
     runtime = plugin.register(ctx)
-    assert time.monotonic() - start < 2
     assert runtime.ready.wait(5) and runtime.status == 'owner'
     yield ctx, runtime
     ctx.unload()
+
+
+def test_registration_does_not_wait_for_observer_startup(isolated_home, monkeypatch):
+    from tabwatch_plugin.service import Service
+    async def blocked_start(service):
+        await asyncio.Event().wait()
+    monkeypatch.setattr(Service, 'start', blocked_start)
+    ctx = configured(isolated_home, settings())
+    runtime = plugin.register(ctx)
+    try:
+        # The observer cannot become ready; registration still returns its handle.
+        assert runtime is not None and not runtime.ready.is_set()
+    finally:
+        ctx.unload()
 
 
 def test_browser_single_dispatch_namespaced_and_released(loaded):

@@ -34,6 +34,23 @@ def until(predicate, timeout=10):
     raise AssertionError('test deadline')
 
 
+def test_external_cron_worker_never_acquires_observer_ownership(tmp_path, monkeypatch):
+    import sys
+    import tabwatch_plugin.runtime as module
+    monkeypatch.setattr(sys, 'argv', ['scheduler.py', '--external-worker-file', 'fixture.json'])
+    def forbidden_owner(*args, **kwargs):
+        raise AssertionError('external worker tried to own observer')
+    monkeypatch.setattr(module, 'Service', forbidden_owner)
+    runtime = Runtime(tmp_path, settings(), Policy(), None)
+    runtime.start()
+    try:
+        assert runtime.ready.wait(5) and runtime.status == 'attached'
+        assert runtime.thread.is_alive() and runtime.service is None
+        assert not (runtime.state / 'service.lock').exists()
+    finally:
+        runtime.stop()
+
+
 def test_lock_election_before_store_and_nonowner_unload(tmp_path, monkeypatch):
     import tabwatch_plugin.service as module
     async def quiet_observer(self):
