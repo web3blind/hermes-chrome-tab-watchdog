@@ -858,7 +858,7 @@ class Service:
 
     def health(self):
         base = {'healthy':False, 'cleanup_error':self.cleanup_error, 'runtime_pid':os.getpid(),
-                'runtime_version':'2.1.2',
+                'runtime_version':'2.1.3',
                 'proxy_port':self.port, 'policy':None,
                 'runtime_incarnation':self.incarnation,
                 'cleanup_gap_reason':gap_reason(self.socket_path.parent),
@@ -942,9 +942,12 @@ class Service:
                 'health', 'sweep', 'fence', 'lease_start', 'lease_end'} else 'unparsed'
             self.last_control_error = {
                 'command': safe_command, 'stage': stage, 'kind': type(exc).__name__}
-            # A disconnected reader of a parsed health request cannot lose tool
-            # activity. Health telemetry faults already latch inside health().
-            if command is None or mutating:
+            # A lost reply cannot undo a completed mutation: registered leases
+            # still protect browser calls, and completed sweeps retain tracking.
+            # A caller without a lease acknowledgement fences before dispatch.
+            # Keep execution failures fail-closed, without resetting recovery
+            # for harmless disconnects after execution or weakening a fence.
+            if command is None or (mutating and stage != 'reply'):
                 self.disable_cleanup('control_failure')
                 logging.getLogger(__name__).warning(
                     'Chrome tab watchdog control failed: command=%s stage=%s kind=%s; '

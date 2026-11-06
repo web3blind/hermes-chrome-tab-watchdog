@@ -160,3 +160,58 @@ async def test_disconnected_dry_run_reader_does_not_disable_cleanup(tmp_path, mo
         assert not (tmp_path / 'cleanup.gap').exists()
     finally:
         await service.stop()
+
+
+@pytest.mark.parametrize('command', ['lease_start', 'lease_end', 'fence', 'sweep'])
+async def test_completed_mutation_with_lost_reply_preserves_tracking(owner, command):
+    service, _ = owner
+    if command == 'lease_end':
+        service.store.lease_start('fixture', 60)
+    import json
+    payload = {'cmd': command, 'call_id': 'fixture', 'ttl': 60,
+               'apply': True, 'cause': 'route_unobserved'}
+    reader = asyncio.StreamReader()
+    reader.feed_data((json.dumps(payload) + '\n').encode())
+    reader.feed_eof()
+
+    class DisconnectedWriter:
+        def write(self, data):
+            raise ConnectionResetError()
+        async def drain(self):
+            pass
+        def close(self):
+            pass
+        async def wait_closed(self):
+            pass
+
+    async def sweep(apply=False):
+        return {'closed': [], 'errors': []}
+    service.sweep = sweep
+    await service.control_client(reader, DisconnectedWriter())
+    if command == 'fence':
+        from tabwatch_plugin.control import gap_reason
+        assert gap_reason(service.socket_path.parent) == 'route_unobserved'
+    else:
+        assert service.cleanup_error is None
+        assert not (service.socket_path.parent / 'cleanup.gap').exists()
+    assert ('fixture' in service.store.leases) is (command == 'lease_start')
+
+
+async def test_failed_mutation_still_fences_cleanup(owner):
+    service, _ = owner
+    reader = asyncio.StreamReader()
+    reader.feed_data(b'{"cmd":"lease_start","call_id":"fixture","ttl":"invalid"}\n')
+    reader.feed_eof()
+
+    class Writer:
+        def write(self, data):
+            pass
+        async def drain(self):
+            pass
+        def close(self):
+            pass
+        async def wait_closed(self):
+            pass
+
+    await service.control_client(reader, Writer())
+    assert service.cleanup_error == 'control_failure'

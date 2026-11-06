@@ -82,8 +82,9 @@ Gap records contain only an enumerated cause, timestamp and PID. Health reports 
 
 ## Idle timer continuity
 
-A disconnected read-only dry-run client does not disable cleanup. An uncertain mutating
-control request still fences it. Transient control, lease and activity-telemetry failures can recover
+A disconnected read-only dry-run client does not disable cleanup. A lost reply after a completed mutation preserves the registered lease or completed
+sweep; failures during mutation still fence cleanup. A client without a lease
+acknowledgement continues to fence before dispatching its browser action. Transient control, lease and activity-telemetry failures can recover
 automatically after 1900 seconds (the maximum browser-call lease), once fresh complete
 observation is available and no leases or pending commands remain. Every new transient
 fence restarts the full wait; routing, settings and ledger failures remain blocked for

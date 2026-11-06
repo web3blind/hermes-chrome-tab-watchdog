@@ -34,7 +34,7 @@ async def test_disconnected_health_reader_does_not_fence_service(tmp_path, monke
         await service.stop()
 
 
-async def test_disconnected_mutating_control_still_fences_service(tmp_path, monkeypatch):
+async def test_disconnected_completed_sweep_does_not_fence_service(tmp_path, monkeypatch):
     service = Service(tmp_path, port=0)
     await service.start()
     async def slow_sweep(apply=False):
@@ -47,7 +47,7 @@ async def test_disconnected_mutating_control_still_fences_service(tmp_path, monk
         await asyncio.sleep(.25)
         reply = await asyncio.to_thread(request, tmp_path, 'health')
         assert reply['healthy'] is False
-        assert reply['cleanup_error'] == 'control_failure'
-        assert reply['cleanup_gap_reason'] == 'control_failure'
+        assert reply['cleanup_error'] is None
+        assert reply['cleanup_gap_reason'] is None
     finally:
         await service.stop()
