@@ -4,6 +4,7 @@ import contextlib
 import json
 import logging
 import os
+import sqlite3
 import time
 import uuid
 import urllib.request
@@ -17,7 +18,7 @@ from websockets.asyncio.server import serve
 from websockets.datastructures import Headers
 from websockets.http11 import Response
 from .store import Store, page_target
-from .control import fence_cleanup, socket_address, gap_reason, fence_stamp
+from .control import fence_cleanup, socket_address, gap_reason, fence_stamp, cleanup_diagnostic
 
 # An unacknowledged control call can cover a browser action for this long.
 # Recovery never assumes that a timed-out caller stopped its work.
@@ -179,6 +180,7 @@ class Service:
         # Elect BEFORE opening SQLite, generating keys, chmod or touching sockets.
         import fcntl
         state = Path(state_dir)
+        self.last_cleanup_error = cleanup_diagnostic(state)
         state.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock = open(state / 'service.lock', 'a')
         try:
@@ -299,7 +301,8 @@ class Service:
         if self.store is not None:
             self.store.disabled = True
         with contextlib.suppress(Exception):
-            fence_cleanup(self.socket_path.parent, reason=cause or reason)
+            fence_cleanup(self.socket_path.parent, reason=cause or reason,
+                          last_cleanup_error=self.last_cleanup_error)
             self.control_recovery = (
                 (time.monotonic() + CONTROL_RECOVERY_SECONDS,
                  fence_stamp(self.socket_path.parent))
@@ -796,23 +799,49 @@ class Service:
                 self.rpc=None
                 await asyncio.sleep(2)
 
+    def cleanup_failed(self, result, exc, stage, progress, method=None,
+                       reason='close_failed', target=None):
+        kind = next((name for cls, name in (
+            (TimeoutError, 'TimeoutError'), (ConnectionError, 'ConnectionError'),
+            (OSError, 'OSError'), (sqlite3.Error, 'DatabaseError'),
+            (ValueError, 'ValueError'), (TypeError, 'TypeError'), (KeyError, 'KeyError'),
+            (RuntimeError, 'RuntimeError')) if isinstance(exc, cls)), 'Exception')
+        self.last_cleanup_error = {'stage': stage, 'progress': progress, 'method': method,
+                                   'kind': kind, 'reason': reason, 'at': time.time()}
+        error = {'reason': reason, 'diagnostic': self.last_cleanup_error.copy()}
+        if target is not None:
+            error['target_id'] = target
+        result['errors'].append(error)
+        self.disable_cleanup('cleanup_failure')
+
     async def sweep(self, apply=False):
         async with self.sweep_lock:
             result={'candidates':[], 'closed':[], 'errors':[]}
-            if self.cleanup_error or not self.store or not self.store.healthy() or not self.rpc:
-                result['errors'].append({'reason':'cleanup_disabled'})
+            try:
+                if self.cleanup_error or not self.store or not self.store.healthy() or not self.rpc:
+                    result['errors'].append({'reason':'cleanup_disabled'})
+                    return result
+                planned=self.store.candidates()[:5]
+            except Exception as exc:
+                self.cleanup_failed(result, exc, 'planning', 'not_attempted')
                 return result
-            planned=self.store.candidates()[:5]
             result['candidates']=[{'target_id':tid,'reason':reason} for tid,reason in planned]
             if not apply: return result
             for tid,reason in planned:
+                stage = 'snapshot'
+                progress = 'not_attempted'
+                method = None
+                failure_reason = 'close_failed'
                 try:
                     snapshot=next((r for r in self.store.rows() if r['target']==tid),None)
                     if snapshot is None: continue
+                    stage = 'discovery'
                     version=await self.version()
                     if urlsplit(version['webSocketDebuggerUrl']).path.rsplit('/',1)[-1] != self.store.epoch:
                         self.store.gap('browser_epoch_changed'); break
+                    stage, method = 'inventory', 'Target.getTargets'
                     targets=(await self.rpc.call('Target.getTargets'))['targetInfos']
+                    stage, method = 'revalidation', None
                     target=next((t for t in targets if t['targetId']==tid),None)
                     if not target or not page_target(target): continue
                     if self.store.digest(target.get('url','')) != snapshot['url_hash']:
@@ -831,34 +860,45 @@ class Service:
                     if target.get('url') == 'about:blank' and sum(
                             t.get('url') == 'about:blank' for t in pages) <= 1: continue
                     # No awaits between final activity/fence check and sending the close.
+                    stage, method = 'close', 'Target.closeTarget'
+                    progress = 'outcome_unknown'
                     closed=await self.rpc.call('Target.closeTarget',{'targetId':tid})
-                    if not closed.get('success'): raise RuntimeError('close_refused')
+                    progress = 'acknowledged'
+                    if not closed.get('success'):
+                        failure_reason = 'close_refused'
+                        raise RuntimeError('close_refused')
+                    stage, method = 'verification', 'Target.getTargets'
                     disappeared=False
                     for _ in range(10):
                         remaining=(await self.rpc.call('Target.getTargets'))['targetInfos']
                         if not any(t['targetId']==tid for t in remaining):
                             disappeared=True; break
                         await asyncio.sleep(.1)
-                    if not disappeared: raise RuntimeError('close_unverified')
+                    if not disappeared:
+                        failure_reason = 'close_unverified'
+                        raise RuntimeError('close_unverified')
+                    progress = 'disappearance_verified'
                     result['closed'].append(tid)
+                    stage, method = 'post_close_ledger', None
                     self.store.observe(remaining)
                     if tid != planned[-1][0]:
                         # Our own close invalidates inventory. Wait for the real
                         # observer to revalidate it; never manufacture readiness.
+                        stage = 'observer_wait'
                         for _ in range(50):
                             if self.store.healthy():
                                 break
                             await asyncio.sleep(.1)
                         if not self.store.healthy():
                             break
-                except Exception:
-                    result['errors'].append({'target_id':tid,'reason':'close_failed'})
-                    self.disable_cleanup('cleanup_failure'); break
+                except Exception as exc:
+                    self.cleanup_failed(result, exc, stage, progress, method, failure_reason, tid)
+                    break
             return result
 
     def health(self):
         base = {'healthy':False, 'cleanup_error':self.cleanup_error, 'runtime_pid':os.getpid(),
-                'runtime_version':'2.1.3',
+                'runtime_version':'2.1.4',
                 'proxy_port':self.port, 'policy':None,
                 'runtime_incarnation':self.incarnation,
                 'cleanup_gap_reason':gap_reason(self.socket_path.parent),
@@ -867,6 +907,7 @@ class Service:
             max(0, self.control_recovery[0] - time.monotonic())
             if self.control_recovery is not None else None)
         base['last_control_error'] = self.last_control_error
+        base['last_cleanup_error'] = self.last_cleanup_error
         base['startup_cleanup_wait_seconds'] = (
             max(0, self.store.cleanup_hold_until - time.monotonic())
             if self.store is not None else None)

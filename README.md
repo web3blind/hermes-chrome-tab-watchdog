@@ -78,7 +78,31 @@ python cron.py
 
 A failure of an attached process's read-only health probe does not imply lost browser activity. The probe is retried without poisoning the owner. A disconnected reader of a parsed health response is also harmless. Invalid settings, missed browser leases, routing bypasses, telemetry errors and uncertain mutating control requests still durably disable cleanup.
 
-Gap records contain only an enumerated cause, timestamp and PID. Health reports cleanup_gap_reason; the CLI distinguishes a latched cleanup block from a dead observer. Legacy gap records do not contain enough data to identify the original trigger. A reload accepts the previous gap baseline but starts fresh observation grace; it must never reuse the unobserved interval to close tabs early.
+Gap records contain an enumerated cause, timestamp and PID, plus sanitized failed-sweep evidence when available. Health reports cleanup_gap_reason; the CLI distinguishes a latched cleanup block from a dead observer. Legacy gap records do not contain enough data to identify the original trigger. A reload accepts the previous gap baseline but starts fresh observation grace; it must never reuse the unobserved interval to close tabs early.
+
+Failed sweeps expose `last_cleanup_error` in health and a matching `diagnostic` in
+the sweep error. Its bounded fields are a fixed stage, allowlisted exception
+category (`kind`), allowlisted CDP `method` (or null), timestamp (`at`), fixed
+`reason`, and close `progress`: `not_attempted`, `outcome_unknown`,
+`acknowledged`, or `disappearance_verified`. `close_refused` identifies a negative
+close acknowledgement; `close_unverified` means the acknowledged target remained
+in the verification inventory. Other failures use `close_failed`, with stage and
+progress distinguishing discovery/inventory failures, uncertain close outcomes,
+verification errors and post-close ledger failures. Exception text, arbitrary
+exception class/method names, URLs, titles and command arguments are never stored
+in this evidence.
+
+The latest incident is persisted alongside the gap record and retained across
+reloads and later fences; it is historical evidence, not a claim that the current
+observer is failing. Legacy records have no incident detail. Persistence failure
+still leaves the in-memory diagnostic and cleanup latch intact. A failed sweep
+keeps the permanent `cleanup_failure` fence for that owner: no automatic recovery
+or retry of an uncertain close. Existing reload grace/old-lease holds are unchanged.
+The control client preserves validated sweep errors and any verified `closed`
+receipts, including a disappearance verified before a ledger write failed. The CLI
+prints that receipt and exits nonzero; an acknowledged but unverified close is
+never included in `closed`. Lease acknowledgements and other control rejections
+remain errors.
 
 ## Idle timer continuity
 
