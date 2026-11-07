@@ -103,7 +103,7 @@ def valid_sweep_result(value):
     """Only sweep receipts may carry errors as data rather than a rejection."""
     if set(value) != {'candidates', 'closed', 'errors'}:
         return False
-    if any(not isinstance(value[key], list) or len(value[key]) > 5 for key in value):
+    if any(not isinstance(value[key], list) for key in value) or len(value['errors']) > 5:
         return False
     def target(value):
         return isinstance(value, str) and 0 < len(value) <= 256

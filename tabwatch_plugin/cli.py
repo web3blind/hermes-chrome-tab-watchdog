@@ -39,7 +39,7 @@ def main(argv=None):
                 else:
                     print('Chrome tab watchdog: observer is unhealthy; cleanup skipped.')
                 return 1
-        result=request(state,'health' if args.health else 'sweep',timeout=120,**({} if args.health else {'apply':args.apply}))
+        result=request(state,'health' if args.health else 'sweep',timeout=180,**({} if args.health else {'apply':args.apply}))
     except Exception as exc:
         print('Chrome tab watchdog: control request failed ('+type(exc).__name__+').')
         return 1

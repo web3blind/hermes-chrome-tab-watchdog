@@ -450,6 +450,34 @@ class DisposableObserverRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.tid, [t['targetId'] for t in remaining])
         self.assertIn(keeper, [t['targetId'] for t in remaining])
 
+    async def test_more_than_five_verified_closes_through_real_control_cli(self):
+        import asyncio, contextlib, io, json, time
+        from tabwatch_plugin.cli import main
+        now = [time.time()]
+        self.service.store.clock = lambda: now[0]
+        closing = set()
+        for i in range(6):
+            target = await self.client.call('Target.createTarget', {
+                'url': f'data:text/html,<p>disposable-budget-{i}</p>', 'background': True})
+            closing.add(target['targetId'])
+        await self.wait(lambda: self.service.store.healthy() and
+                        closing <= self.service.installed)
+        now[0] += 21601
+        self.service.store.heartbeat()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = await asyncio.to_thread(main, [
+                '--apply', '--state-dir', str(self.service.socket_path.parent)])
+        self.assertEqual(code, 0, output.getvalue())
+        receipt = json.loads(output.getvalue())
+        self.assertEqual(set(receipt['closed']), closing)
+        self.assertEqual(len(receipt['closed']), 6)
+        self.assertEqual(receipt['errors'], [])
+        self.assertEqual(len(receipt['candidates']), 7)
+        remaining = (await self.client.call('Target.getTargets'))['targetInfos']
+        self.assertEqual({t['targetId'] for t in remaining if t['type'] == 'page'}, {self.tid})
+        self.assertIsNone(self.service.cleanup_error)
+
     def activation(self):
         return next(r for r in self.service.store.rows() if r['target']==self.tid)['last_activation']
 

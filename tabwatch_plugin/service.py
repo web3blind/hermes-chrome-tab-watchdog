@@ -817,11 +817,12 @@ class Service:
     async def sweep(self, apply=False):
         async with self.sweep_lock:
             result={'candidates':[], 'closed':[], 'errors':[]}
+            deadline = time.monotonic() + 60
             try:
                 if self.cleanup_error or not self.store or not self.store.healthy() or not self.rpc:
                     result['errors'].append({'reason':'cleanup_disabled'})
                     return result
-                planned=self.store.candidates()[:5]
+                planned=self.store.candidates()
             except Exception as exc:
                 self.cleanup_failed(result, exc, 'planning', 'not_attempted')
                 return result
@@ -833,6 +834,9 @@ class Service:
                 method = None
                 failure_reason = 'close_failed'
                 try:
+                    if (time.monotonic() >= deadline or self.cleanup_error
+                            or not self.store.healthy() or self.store.fenced()):
+                        break
                     snapshot=next((r for r in self.store.rows() if r['target']==tid),None)
                     if snapshot is None: continue
                     stage = 'discovery'
@@ -842,6 +846,9 @@ class Service:
                     stage, method = 'inventory', 'Target.getTargets'
                     targets=(await self.rpc.call('Target.getTargets'))['targetInfos']
                     stage, method = 'revalidation', None
+                    if (time.monotonic() >= deadline or self.cleanup_error
+                            or not self.store.healthy() or self.store.fenced()):
+                        break
                     target=next((t for t in targets if t['targetId']==tid),None)
                     if not target or not page_target(target): continue
                     if self.store.digest(target.get('url','')) != snapshot['url_hash']:
@@ -860,6 +867,9 @@ class Service:
                     if target.get('url') == 'about:blank' and sum(
                             t.get('url') == 'about:blank' for t in pages) <= 1: continue
                     # No awaits between final activity/fence check and sending the close.
+                    # This is an admission budget, not cancellation of an uncertain close.
+                    if time.monotonic() >= deadline:
+                        break
                     stage, method = 'close', 'Target.closeTarget'
                     progress = 'outcome_unknown'
                     closed=await self.rpc.call('Target.closeTarget',{'targetId':tid})
@@ -881,12 +891,12 @@ class Service:
                     result['closed'].append(tid)
                     stage, method = 'post_close_ledger', None
                     self.store.observe(remaining)
-                    if tid != planned[-1][0]:
+                    if tid != planned[-1][0] and time.monotonic() < deadline:
                         # Our own close invalidates inventory. Wait for the real
                         # observer to revalidate it; never manufacture readiness.
                         stage = 'observer_wait'
                         for _ in range(50):
-                            if self.store.healthy():
+                            if time.monotonic() >= deadline or self.store.fenced() or self.store.healthy():
                                 break
                             await asyncio.sleep(.1)
                         if not self.store.healthy():
@@ -898,7 +908,7 @@ class Service:
 
     def health(self):
         base = {'healthy':False, 'cleanup_error':self.cleanup_error, 'runtime_pid':os.getpid(),
-                'runtime_version':'2.1.4',
+                'runtime_version':'2.1.5',
                 'proxy_port':self.port, 'policy':None,
                 'runtime_incarnation':self.incarnation,
                 'cleanup_gap_reason':gap_reason(self.socket_path.parent),
